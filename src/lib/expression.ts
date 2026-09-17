@@ -55,9 +55,13 @@ interface ParseResult {
 
 const ABSENT: ParseResult = { value: null, indices: [] };
 
-// 1e10 倍して丸める方法は MAX_SAFE_INTEGER を超える金額で壊れるため使わない
+// 整数はそのまま返す。toPrecision(12) は1兆円台から桁を落としてしまい、
+// 計算をしていない金額まで既定モードと違う値になってしまうため。
 function round(value: number): number | null {
-  return Number.isFinite(value) ? Number(value.toPrecision(12)) : null;
+  if (!Number.isFinite(value)) {
+    return null;
+  }
+  return Number.isInteger(value) ? value : Number(value.toPrecision(12));
 }
 
 // 「円」「¥」「個」などの糊トークンをここで捨てることで、
@@ -201,15 +205,19 @@ function parseBinary(
     const start = cursor.pos;
     cursor.pos++;
     const right = parseOperand(cursor);
-    const applied =
-      right.value === null
-        ? null
-        : round(BINARY_OPERATIONS[term.op](value, right.value));
 
-    // 右オペランドの無い演算子とゼロ除算・オーバーフローは、演算子ごと捨てて左辺を残す
-    if (applied === null) {
+    // 右オペランドが無い演算子は、演算子ごと捨てて左辺を残す
+    if (right.value === null) {
       cursor.pos = start;
       break;
+    }
+
+    // ゼロ除算やオーバーフローは、その演算だけを捨てて読み進める。
+    // 右オペランドを読み戻すと、独立した式として数え直され、
+    // 計算に使われていないのに計算対象として色が付いてしまう。
+    const applied = round(BINARY_OPERATIONS[term.op](value, right.value));
+    if (applied === null) {
+      continue;
     }
 
     value = applied;

@@ -23,6 +23,11 @@ const EXCLUDED_CLASS =
   "bg-red-200 text-red-800 dark:bg-red-700 dark:text-red-100";
 const MUTED_CLASS = "bg-muted text-muted-foreground";
 
+// 既定の maximumFractionDigits は3で、割り勘のような小数の合計が
+// 表示とコピーの時点だけ静かに丸められてしまうため明示する
+const formatTotal = (total: number): string =>
+  total.toLocaleString(undefined, { maximumFractionDigits: 10 });
+
 const EXPRESSION_TYPES = new Set<Input["contentType"]>([
   "number",
   "operator",
@@ -95,11 +100,11 @@ function App() {
     if (arithmeticMode) {
       const result = evaluateTokens(tokens);
       setIncludedIndices(result.includedIndices);
-      setCalculateResult(result.total.toLocaleString());
+      setCalculateResult(formatTotal(result.total));
     } else {
       setIncludedIndices(new Set());
       const total = calculateTotal(onlyAfterYenMark, onlyBeforeYen, tokens);
-      setCalculateResult(total.toLocaleString());
+      setCalculateResult(formatTotal(total));
     }
   }, [userInput, onlyAfterYenMark, onlyBeforeYen, arithmeticMode]);
 

@@ -132,3 +132,21 @@ test("evaluateTokens: 記号の羅列でスタックを溢れさせない", () =
   expect(total(`1 ${"-".repeat(50000)} 2`)).toBe(3);
   expect(total(`${"(".repeat(50000)}1${")".repeat(50000)}`)).toBe(1);
 });
+
+test("evaluateTokens: 1兆円台の整数を丸めない", () => {
+  expect(total("1,234,567,890,123円")).toBe(1234567890123);
+  expect(total("12,345,678,901,234円 + 1円")).toBe(12345678901235);
+});
+
+test("evaluateTokens: 捨てた演算の右オペランドは計算対象にしない", () => {
+  // 3000(0) 円(1) 空白(2) /(3) 空白(4) 0(5) 人(6)
+  const tokens = tokenize("3000円 / 0人", true);
+  expect(evaluateTokens(tokens)).toStrictEqual({
+    total: 3000,
+    includedIndices: new Set([0]),
+  });
+});
+
+test("evaluateTokens: ゼロ除算のあとも同じ式の評価を続ける", () => {
+  expect(total("3000円 / 0人 + 500円")).toBe(3500);
+});
