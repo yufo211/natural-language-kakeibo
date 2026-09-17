@@ -13,8 +13,15 @@ import {
   isYenIncludedInCalculation,
   isYenMarkIncludedInCalculation,
 } from "./lib/calculate";
+import { evaluateTokens } from "./lib/expression";
 import { tokenize } from "./lib/tokenize";
 import type { Input } from "./types";
+
+const INCLUDED_CLASS =
+  "bg-green-200 text-green-800 dark:bg-green-700 dark:text-green-100"; // 計算対象
+const EXCLUDED_CLASS =
+  "bg-red-200 text-red-800 dark:bg-red-700 dark:text-red-100";
+const MUTED_CLASS = "bg-muted text-muted-foreground";
 
 function App() {
   const [userInput, setUserInput] = useState<string>("");
@@ -22,7 +29,11 @@ function App() {
 
   const [onlyAfterYenMark, setOnlyAfterYenMark] = useState<boolean>(false);
   const [onlyBeforeYen, setOnlyBeforeYen] = useState<boolean>(false);
+  const [arithmeticMode, setArithmeticMode] = useState<boolean>(false);
 
+  const [includedIndices, setIncludedIndices] = useState<Set<number>>(
+    new Set(),
+  );
   const [calculateResult, setCalculateResult] = useState<string>("");
   const [isCopied, setIsCopied] = useState<boolean>(false);
 
@@ -30,9 +41,24 @@ function App() {
     window.confirm("入力された内容がクリアされます。よろしいですか？") &&
     setUserInput("");
 
-  const handleCalculate = () => {
-    const t = tokenize(userInput);
-    setFilterInput(t);
+  // 計算式モードと「¥」「円」による絞り込みは考え方が逆なので併用できない。
+  // どちらかをオンにすると、もう片方は自動でオフになる。
+  const handleArithmeticModeChange = (checked: boolean) => {
+    setArithmeticMode(checked);
+    if (checked) {
+      setOnlyAfterYenMark(false);
+      setOnlyBeforeYen(false);
+    }
+  };
+
+  const handleOnlyAfterYenMarkChange = (checked: boolean) => {
+    setOnlyAfterYenMark(checked);
+    if (checked) setArithmeticMode(false);
+  };
+
+  const handleOnlyBeforeYenChange = (checked: boolean) => {
+    setOnlyBeforeYen(checked);
+    if (checked) setArithmeticMode(false);
   };
 
   useEffect(() => {
@@ -49,16 +75,26 @@ function App() {
   });
 
   useEffect(() => {
-    if (userInput.trim() !== "") {
-      const t = tokenize(userInput);
-      setFilterInput(t);
-      const total = calculateTotal(onlyAfterYenMark, onlyBeforeYen, t);
+    if (userInput.trim() === "") {
+      setFilterInput([]);
+      setIncludedIndices(new Set());
+      setCalculateResult("");
+      return;
+    }
+
+    const t = tokenize(userInput, arithmeticMode);
+    setFilterInput(t);
+
+    if (arithmeticMode) {
+      const { total, includedIndices } = evaluateTokens(t);
+      setIncludedIndices(includedIndices);
       setCalculateResult(total.toLocaleString());
     } else {
-      setFilterInput([]);
-      setCalculateResult("");
+      setIncludedIndices(new Set());
+      const total = calculateTotal(onlyAfterYenMark, onlyBeforeYen, t);
+      setCalculateResult(total.toLocaleString());
     }
-  }, [userInput, onlyAfterYenMark, onlyBeforeYen]);
+  }, [userInput, onlyAfterYenMark, onlyBeforeYen, arithmeticMode]);
 
   const copyToClipboard = async () => {
     await navigator.clipboard.writeText(calculateResult);
@@ -99,10 +135,7 @@ function App() {
           id="user_input"
           className="h-48 resize-y"
           placeholder="ここに内容を貼り付けてください。（例：¥2,000 映画代）"
-          onChange={(e) => {
-            setUserInput(e.target.value);
-            handleCalculate();
-          }}
+          onChange={(e) => setUserInput(e.target.value)}
           value={userInput}
         />
 
@@ -111,7 +144,7 @@ function App() {
             <Switch
               id="only_after_yen_mark"
               checked={onlyAfterYenMark}
-              onCheckedChange={setOnlyAfterYenMark}
+              onCheckedChange={handleOnlyAfterYenMarkChange}
             />
             <Label htmlFor="only_after_yen_mark">
               前に「¥」がついている数字だけを計算に含める
@@ -121,12 +154,26 @@ function App() {
             <Switch
               id="only_before_yen"
               checked={onlyBeforeYen}
-              onCheckedChange={setOnlyBeforeYen}
+              onCheckedChange={handleOnlyBeforeYenChange}
             />
             <Label htmlFor="only_before_yen">
               後ろに「円」がついている数字だけを計算に含める
             </Label>
           </div>
+          <div className="my-2 flex items-center space-x-2">
+            <Switch
+              id="arithmetic_mode"
+              checked={arithmeticMode}
+              onCheckedChange={handleArithmeticModeChange}
+            />
+            <Label htmlFor="arithmetic_mode">
+              計算式（＋ − × ÷ と括弧）を解釈して計算する
+            </Label>
+          </div>
+          <p className="ml-1 text-muted-foreground text-sm">
+            計算式モードをオンにすると、上の2つの設定はオフになります。括弧は半角の
+            ( ) をお使いください。
+          </p>
         </div>
 
         <div className="w-full max-w-3xl">
@@ -138,7 +185,24 @@ function App() {
               }
 
               let className = "";
-              if (token.contentType === "number") {
+              if (arithmeticMode) {
+                // 計算式モードでは「¥」「円」による絞り込みを使わないので、
+                // 式に採用されたトークンかどうかだけで色を決める
+                if (token.contentType === "space") {
+                  className = "";
+                } else if (
+                  token.contentType === "number" ||
+                  token.contentType === "operator" ||
+                  token.contentType === "LParen" ||
+                  token.contentType === "RParen"
+                ) {
+                  className = includedIndices.has(index)
+                    ? INCLUDED_CLASS
+                    : MUTED_CLASS;
+                } else {
+                  className = EXCLUDED_CLASS;
+                }
+              } else if (token.contentType === "number") {
                 const isIncluded = isTokenIncludedInCalculation(
                   token,
                   index,
@@ -146,9 +210,7 @@ function App() {
                   onlyAfterYenMark,
                   onlyBeforeYen,
                 );
-                className = isIncluded
-                  ? "bg-green-200 text-green-800 dark:bg-green-700 dark:text-green-100" // 計算対象
-                  : "bg-muted text-muted-foreground";
+                className = isIncluded ? INCLUDED_CLASS : MUTED_CLASS;
               } else if (token.contentType === "space") {
                 className = "";
               } else if (token.contentType === "YenMark") {
@@ -158,9 +220,7 @@ function App() {
                   onlyAfterYenMark,
                   onlyBeforeYen,
                 );
-                className = isIncluded
-                  ? "bg-green-200 text-green-800 dark:bg-green-700 dark:text-green-100" // 計算対象
-                  : "bg-red-200 text-red-800 dark:bg-red-700 dark:text-red-100";
+                className = isIncluded ? INCLUDED_CLASS : EXCLUDED_CLASS;
               } else if (token.contentType === "Yen") {
                 const isIncluded = isYenIncludedInCalculation(
                   index,
@@ -168,12 +228,9 @@ function App() {
                   onlyAfterYenMark,
                   onlyBeforeYen,
                 );
-                className = isIncluded
-                  ? "bg-green-200 text-green-800 dark:bg-green-700 dark:text-green-100" // 計算対象
-                  : "bg-red-200 text-red-800 dark:bg-red-700 dark:text-red-100";
+                className = isIncluded ? INCLUDED_CLASS : EXCLUDED_CLASS;
               } else {
-                className =
-                  "bg-red-200 text-red-800 dark:bg-red-700 dark:text-red-100";
+                className = EXCLUDED_CLASS;
               }
 
               return (
