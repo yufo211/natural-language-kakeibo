@@ -1,7 +1,8 @@
 import type { EvaluationResult, Input } from "../types";
 
-// 表記ゆれのある演算子を + - * / に正規化する
-const OPERATORS: Record<string, string> = {
+type Operator = "+" | "-" | "*" | "/";
+
+const OPERATOR_ALIASES: Record<string, Operator> = {
   "+": "+",
   "＋": "+",
   "-": "-",
@@ -17,16 +18,28 @@ const OPERATORS: Record<string, string> = {
   "÷": "/",
 };
 
+const BINARY_OPERATIONS: Record<
+  Operator,
+  (left: number, right: number) => number
+> = {
+  "+": (left, right) => left + right,
+  "-": (left, right) => left - right,
+  "*": (left, right) => left * right,
+  "/": (left, right) => left / right,
+};
+
+const ADDITIVE: Operator[] = ["+", "-"];
+const MULTIPLICATIVE: Operator[] = ["*", "/"];
+
 // 貼り付けられたゴミでスタックを掘り尽くさないための括弧のネスト上限
 const MAX_DEPTH = 64;
 
-// 計算に関係するトークンだけを取り出したもの
-interface Term {
-  index: number; // 元のトークン配列におけるインデックス
-  kind: "number" | "operator" | "LParen" | "RParen";
-  value: number; // kind === "number" のときの数値
-  op: string; // kind === "operator" のときの正規化済み記号
-}
+type Term =
+  | { index: number; kind: "number"; value: number }
+  | { index: number; kind: "operator"; op: Operator }
+  | { index: number; kind: "LParen" | "RParen" };
+
+type OperatorTerm = Extract<Term, { kind: "operator" }>;
 
 interface Cursor {
   terms: Term[];
@@ -34,53 +47,43 @@ interface Cursor {
   depth: number;
 }
 
-// value === null は「オペランドが無い」ことを表す。
-// indices には実際に採用したトークンのインデックスだけを入れる。
+// value === null は「オペランドが無い」ことを表す
 interface ParseResult {
   value: number | null;
-  indices: number[];
+  indices: readonly number[];
 }
 
 const ABSENT: ParseResult = { value: null, indices: [] };
 
-// 浮動小数点の誤差を落とす。
-// 1e10 倍して丸める方法は MAX_SAFE_INTEGER を超える金額で壊れるため使わない。
-function roundResult(value: number): number {
-  if (!Number.isFinite(value)) {
-    return 0;
-  }
-  return Number(value.toPrecision(12));
+// 1e10 倍して丸める方法は MAX_SAFE_INTEGER を超える金額で壊れるため使わない
+function round(value: number): number | null {
+  return Number.isFinite(value) ? Number(value.toPrecision(12)) : null;
 }
 
-function toNumber(content: string): number {
-  return Number.parseFloat(content.replace(/,/g, ""));
-}
-
-// 「円」「¥」「個」などの糊トークンをここで捨てる。
-// これにより演算子は単位や通貨記号をまたいで結合できる。
+// 「円」「¥」「個」などの糊トークンをここで捨てることで、
+// 演算子が単位や通貨記号をまたいで結合できるようになる
 function toTerm(token: Input, index: number): Term | null {
-  if (token.contentType === "number") {
-    const value = toNumber(token.content);
-    return Number.isFinite(value)
-      ? { index, kind: "number", value, op: "" }
-      : null;
+  switch (token.contentType) {
+    case "number": {
+      const value = Number.parseFloat(token.content.replace(/,/g, ""));
+      return Number.isFinite(value) ? { index, kind: "number", value } : null;
+    }
+    case "operator": {
+      const op = OPERATOR_ALIASES[token.content];
+      return op === undefined ? null : { index, kind: "operator", op };
+    }
+    case "LParen":
+    case "RParen":
+      return { index, kind: token.contentType };
+    default:
+      return null;
   }
-  if (token.contentType === "operator") {
-    const op = OPERATORS[token.content];
-    return op === undefined ? null : { index, kind: "operator", value: 0, op };
-  }
-  if (token.contentType === "LParen" || token.contentType === "RParen") {
-    return { index, kind: token.contentType, value: 0, op: "" };
-  }
-  return null;
 }
 
-// 改行を境界にして、トークン列を行ごとの Term 列に分割する
 function toSegments(tokens: Input[]): Term[][] {
   const segments: Term[][] = [[]];
 
-  for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index];
+  for (const [index, token] of tokens.entries()) {
     if (token.contentType === "LF") {
       segments.push([]);
       continue;
@@ -98,26 +101,13 @@ function peek(cursor: Cursor): Term | undefined {
   return cursor.terms[cursor.pos];
 }
 
-function isOperator(term: Term | undefined, ops: string[]): boolean {
+function isOperator(
+  term: Term | undefined,
+  ops: Operator[],
+): term is OperatorTerm {
   return (
     term !== undefined && term.kind === "operator" && ops.includes(term.op)
   );
-}
-
-function applyBinary(op: string, left: number, right: number): number | null {
-  if (op === "/" && right === 0) {
-    return null;
-  }
-  const result =
-    op === "+"
-      ? left + right
-      : op === "-"
-        ? left - right
-        : op === "*"
-          ? left * right
-          : left / right;
-
-  return Number.isFinite(result) ? roundResult(result) : null;
 }
 
 function parsePrimary(cursor: Cursor): ParseResult {
@@ -135,22 +125,22 @@ function parsePrimary(cursor: Cursor): ParseResult {
     return ABSENT;
   }
 
-  // 括弧。閉じ括弧が無ければ行末で閉じたものとして扱う。
   const start = cursor.pos;
   cursor.pos++;
   cursor.depth++;
   const inner = parseAdditive(cursor);
   cursor.depth--;
 
+  // 中身が無い括弧はオペランドとして使えないので、括弧ごと採用しない
   if (inner.value === null) {
-    // 中身が無い括弧は「オペランド無し」とし、括弧自体も採用しない
     cursor.pos = start;
     return ABSENT;
   }
 
   const indices = [term.index, ...inner.indices];
   const closing = peek(cursor);
-  if (closing !== undefined && closing.kind === "RParen") {
+  // 閉じ括弧が無ければ、行末で閉じられたものとして扱う
+  if (closing?.kind === "RParen") {
     cursor.pos++;
     indices.push(closing.index);
   }
@@ -158,31 +148,40 @@ function parsePrimary(cursor: Cursor): ParseResult {
   return { value: inner.value, indices };
 }
 
+// 符号は再帰ではなく畳み込みで処理する。「-----」のような記号の羅列を
+// 貼り付けられてもスタックを溢れさせないため。
 function parseUnary(cursor: Cursor): ParseResult {
-  const term = peek(cursor);
-  if (!isOperator(term, ["+", "-"]) || term === undefined) {
-    return parsePrimary(cursor);
+  const start = cursor.pos;
+  const signIndices: number[] = [];
+  let negative = false;
+
+  for (
+    let term = peek(cursor);
+    isOperator(term, ADDITIVE);
+    term = peek(cursor)
+  ) {
+    if (term.op === "-") {
+      negative = !negative;
+    }
+    signIndices.push(term.index);
+    cursor.pos++;
   }
 
-  const start = cursor.pos;
-  cursor.pos++;
-  const operand = parseUnary(cursor);
+  const operand = parsePrimary(cursor);
   if (operand.value === null) {
     cursor.pos = start;
     return ABSENT;
   }
 
   return {
-    value: term.op === "-" ? -operand.value : operand.value,
-    indices: [term.index, ...operand.indices],
+    value: negative ? -operand.value : operand.value,
+    indices: [...signIndices, ...operand.indices],
   };
 }
 
-// 左結合の二項演算。右オペランドが無い演算子、および計算不能な演算子
-// （ゼロ除算やオーバーフロー）は、その演算子ごと捨てて左辺を残す。
 function parseBinary(
   cursor: Cursor,
-  ops: string[],
+  ops: Operator[],
   parseOperand: (cursor: Cursor) => ParseResult,
 ): ParseResult {
   const first = parseOperand(cursor);
@@ -191,23 +190,23 @@ function parseBinary(
   }
 
   let value = first.value;
-  const indices = [...first.indices];
+  const indices: number[] = [...first.indices];
 
   for (;;) {
     const term = peek(cursor);
-    if (!isOperator(term, ops) || term === undefined) {
+    if (!isOperator(term, ops)) {
       break;
     }
 
     const start = cursor.pos;
     cursor.pos++;
     const right = parseOperand(cursor);
-    if (right.value === null) {
-      cursor.pos = start;
-      break;
-    }
+    const applied =
+      right.value === null
+        ? null
+        : round(BINARY_OPERATIONS[term.op](value, right.value));
 
-    const applied = applyBinary(term.op, value, right.value);
+    // 右オペランドの無い演算子とゼロ除算・オーバーフローは、演算子ごと捨てて左辺を残す
     if (applied === null) {
       cursor.pos = start;
       break;
@@ -221,32 +220,31 @@ function parseBinary(
 }
 
 function parseMultiplicative(cursor: Cursor): ParseResult {
-  return parseBinary(cursor, ["*", "/"], parseUnary);
+  return parseBinary(cursor, MULTIPLICATIVE, parseUnary);
 }
 
 function parseAdditive(cursor: Cursor): ParseResult {
-  return parseBinary(cursor, ["+", "-"], parseMultiplicative);
+  return parseBinary(cursor, ADDITIVE, parseMultiplicative);
 }
 
-// 1行分を評価する。演算子で繋がっていない式が並んだ場合は、
-// それぞれを独立した式として評価し、合計に足し込む。
+// 演算子で繋がっていない式が並んだ場合は、それぞれ独立した式として合計に足し込む
 function evaluateSegment(terms: Term[], includedIndices: Set<number>): number {
   const cursor: Cursor = { terms, pos: 0, depth: 0 };
   let total = 0;
 
   while (cursor.pos < terms.length) {
     const start = cursor.pos;
-    const parsed = parseAdditive(cursor);
+    const { value, indices } = parseAdditive(cursor);
 
-    if (parsed.value !== null) {
-      total += roundResult(parsed.value);
-      for (const index of parsed.indices) {
+    if (value !== null) {
+      total += value;
+      for (const index of indices) {
         includedIndices.add(index);
       }
     }
 
-    // 1トークンも進まなかった場合（空の括弧や余分な閉じ括弧）は
-    // 無限ループになるため、強制的に読み飛ばす
+    // 空の括弧や余分な閉じ括弧では1トークンも進まないため、
+    // 無限ループを避けて強制的に読み飛ばす
     if (cursor.pos === start) {
       cursor.pos++;
     }
@@ -263,11 +261,7 @@ function evaluateTokens(tokens: Input[]): EvaluationResult {
     total += evaluateSegment(segment, includedIndices);
   }
 
-  return { total: roundResult(total), includedIndices };
+  return { total: round(total) ?? 0, includedIndices };
 }
 
-function calculateArithmeticTotal(tokens: Input[]): number {
-  return evaluateTokens(tokens).total;
-}
-
-export { calculateArithmeticTotal, evaluateTokens };
+export { evaluateTokens };

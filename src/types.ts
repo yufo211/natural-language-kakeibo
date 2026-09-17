@@ -16,7 +16,7 @@ interface Input {
 
 interface EvaluationResult {
   total: number;
-  // トークン配列における「計算に使われたトークン」のインデックス集合
+  // 元のトークン配列に対するインデックス
   includedIndices: Set<number>;
 }
 

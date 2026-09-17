@@ -18,10 +18,17 @@ import { tokenize } from "./lib/tokenize";
 import type { Input } from "./types";
 
 const INCLUDED_CLASS =
-  "bg-green-200 text-green-800 dark:bg-green-700 dark:text-green-100"; // 計算対象
+  "bg-green-200 text-green-800 dark:bg-green-700 dark:text-green-100";
 const EXCLUDED_CLASS =
   "bg-red-200 text-red-800 dark:bg-red-700 dark:text-red-100";
 const MUTED_CLASS = "bg-muted text-muted-foreground";
+
+const EXPRESSION_TYPES = new Set<Input["contentType"]>([
+  "number",
+  "operator",
+  "LParen",
+  "RParen",
+]);
 
 function App() {
   const [userInput, setUserInput] = useState<string>("");
@@ -82,19 +89,65 @@ function App() {
       return;
     }
 
-    const t = tokenize(userInput, arithmeticMode);
-    setFilterInput(t);
+    const tokens = tokenize(userInput, arithmeticMode);
+    setFilterInput(tokens);
 
     if (arithmeticMode) {
-      const { total, includedIndices } = evaluateTokens(t);
-      setIncludedIndices(includedIndices);
-      setCalculateResult(total.toLocaleString());
+      const result = evaluateTokens(tokens);
+      setIncludedIndices(result.includedIndices);
+      setCalculateResult(result.total.toLocaleString());
     } else {
       setIncludedIndices(new Set());
-      const total = calculateTotal(onlyAfterYenMark, onlyBeforeYen, t);
+      const total = calculateTotal(onlyAfterYenMark, onlyBeforeYen, tokens);
       setCalculateResult(total.toLocaleString());
     }
   }, [userInput, onlyAfterYenMark, onlyBeforeYen, arithmeticMode]);
+
+  const tokenClassName = (token: Input, index: number): string => {
+    if (token.contentType === "space") {
+      return "";
+    }
+
+    if (arithmeticMode) {
+      if (!EXPRESSION_TYPES.has(token.contentType)) {
+        return EXCLUDED_CLASS;
+      }
+      return includedIndices.has(index) ? INCLUDED_CLASS : MUTED_CLASS;
+    }
+
+    if (token.contentType === "number") {
+      return isTokenIncludedInCalculation(
+        token,
+        index,
+        filterInput,
+        onlyAfterYenMark,
+        onlyBeforeYen,
+      )
+        ? INCLUDED_CLASS
+        : MUTED_CLASS;
+    }
+    if (token.contentType === "YenMark") {
+      return isYenMarkIncludedInCalculation(
+        index,
+        filterInput,
+        onlyAfterYenMark,
+        onlyBeforeYen,
+      )
+        ? INCLUDED_CLASS
+        : EXCLUDED_CLASS;
+    }
+    if (token.contentType === "Yen") {
+      return isYenIncludedInCalculation(
+        index,
+        filterInput,
+        onlyAfterYenMark,
+        onlyBeforeYen,
+      )
+        ? INCLUDED_CLASS
+        : EXCLUDED_CLASS;
+    }
+    return EXCLUDED_CLASS;
+  };
 
   const copyToClipboard = async () => {
     await navigator.clipboard.writeText(calculateResult);
@@ -184,57 +237,8 @@ function App() {
                 return "\n";
               }
 
-              let className = "";
-              if (arithmeticMode) {
-                // 計算式モードでは「¥」「円」による絞り込みを使わないので、
-                // 式に採用されたトークンかどうかだけで色を決める
-                if (token.contentType === "space") {
-                  className = "";
-                } else if (
-                  token.contentType === "number" ||
-                  token.contentType === "operator" ||
-                  token.contentType === "LParen" ||
-                  token.contentType === "RParen"
-                ) {
-                  className = includedIndices.has(index)
-                    ? INCLUDED_CLASS
-                    : MUTED_CLASS;
-                } else {
-                  className = EXCLUDED_CLASS;
-                }
-              } else if (token.contentType === "number") {
-                const isIncluded = isTokenIncludedInCalculation(
-                  token,
-                  index,
-                  filterInput,
-                  onlyAfterYenMark,
-                  onlyBeforeYen,
-                );
-                className = isIncluded ? INCLUDED_CLASS : MUTED_CLASS;
-              } else if (token.contentType === "space") {
-                className = "";
-              } else if (token.contentType === "YenMark") {
-                const isIncluded = isYenMarkIncludedInCalculation(
-                  index,
-                  filterInput,
-                  onlyAfterYenMark,
-                  onlyBeforeYen,
-                );
-                className = isIncluded ? INCLUDED_CLASS : EXCLUDED_CLASS;
-              } else if (token.contentType === "Yen") {
-                const isIncluded = isYenIncludedInCalculation(
-                  index,
-                  filterInput,
-                  onlyAfterYenMark,
-                  onlyBeforeYen,
-                );
-                className = isIncluded ? INCLUDED_CLASS : EXCLUDED_CLASS;
-              } else {
-                className = EXCLUDED_CLASS;
-              }
-
               return (
-                <span key={index} className={className}>
+                <span key={index} className={tokenClassName(token, index)}>
                   {token.content}
                 </span>
               );

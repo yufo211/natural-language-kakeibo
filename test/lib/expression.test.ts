@@ -1,14 +1,10 @@
 import { expect, test } from "vitest";
-import {
-  calculateArithmeticTotal,
-  evaluateTokens,
-} from "../../src/lib/expression";
+import { evaluateTokens } from "../../src/lib/expression";
 import { tokenize } from "../../src/lib/tokenize";
 import type { Input } from "../../src/types";
 
-// 計算式モードのトークン列を評価した合計を返すヘルパー
 const total = (text: string): number =>
-  calculateArithmeticTotal(tokenize(text, true));
+  evaluateTokens(tokenize(text, true)).total;
 
 test("evaluateTokens: パターン1 - 単価×個数（100円 * 3個）", () => {
   expect(total("100円 * 3個")).toBe(300);
@@ -103,7 +99,7 @@ test("evaluateTokens: ゼロ除算は演算子を捨てて左辺を残す", () =
 
 test("evaluateTokens: 数字がない場合と空の配列", () => {
   expect(total("映画代")).toBe(0);
-  expect(calculateArithmeticTotal([])).toBe(0);
+  expect(evaluateTokens([]).total).toBe(0);
   expect(evaluateTokens([])).toStrictEqual({
     total: 0,
     includedIndices: new Set(),
@@ -130,4 +126,9 @@ test("evaluateTokens: 括弧も計算に使われればインデックスに含�
   expect(evaluateTokens(tokens).includedIndices).toStrictEqual(
     new Set([0, 1, 2, 3, 4]),
   );
+});
+
+test("evaluateTokens: 記号の羅列でスタックを溢れさせない", () => {
+  expect(total(`1 ${"-".repeat(50000)} 2`)).toBe(3);
+  expect(total(`${"(".repeat(50000)}1${")".repeat(50000)}`)).toBe(1);
 });

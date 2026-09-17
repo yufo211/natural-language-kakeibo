@@ -1,60 +1,55 @@
 import type { Input } from "../types";
 
-// 通常モードの正規表現パターン
-// (¥) → 円マーク
-// (円) → 円
-// ([0-9]{1,3}(?:,[0-9]{3})*) → カンマ区切りの数字
-// (\n) → 改行
-// (\s+) → 空白文字（改行以外）
-// ([^¥円0-9\s\n]+) → その他
-const DEFAULT_PATTERN =
-  /([¥￥])|(円)|([0-9]+(?:,[0-9]{3})*)|(\n)|(\s+)|([^¥円0-9\s\n]+)/g;
+type ContentType = Input["contentType"];
+type Rule = [ContentType, string];
 
-// 計算式モードで演算子として扱う記号
-// 長音記号「ー」は「コーヒー」等を壊すため絶対に含めないこと
+interface Scanner {
+  pattern: RegExp;
+  types: ContentType[];
+}
+
+// 長音記号「ー」は「コーヒー」のような語を割ってしまうため演算子に含めない
 const OPERATOR_CHARS = "+\\-＋－−*＊×✕✖/／÷";
 
-// 計算式モードの正規表現パターン
-// 通常モードとの違いは4点
-// 1. 数値に小数部を許可する（1.1 を1トークンにする）
-// 2. 演算子・半角括弧を独立したトークンにする
-// 3. その他（catch-all）の除外文字に新記号と全角￥を加える
-// 4. 空白を [^\S\n]+ にして、空白のあとの改行をLFとして取りこぼさない
-// 全角括弧（）は「¥1000（昼ごはん）」のような注釈で使われるため、
-// 括弧としては扱わず「その他」のままにする
-const ARITHMETIC_PATTERN = new RegExp(
-  "([¥￥])|(円)|([0-9]+(?:,[0-9]{3})*(?:\\.[0-9]+)?)|" +
-    `([${OPERATOR_CHARS}])|(\\()|(\\))|(\\n)|([^\\S\\n]+)|` +
-    `([^¥￥円0-9\\s${OPERATOR_CHARS}()]+)`,
-  "g",
-);
-
-const DEFAULT_TYPES: Input["contentType"][] = [
-  "YenMark",
-  "Yen",
-  "number",
-  "LF",
-  "space",
-  "other",
+const DEFAULT_RULES: Rule[] = [
+  ["YenMark", "[¥￥]"],
+  ["Yen", "円"],
+  ["number", "[0-9]+(?:,[0-9]{3})*"],
+  ["LF", "\\n"],
+  ["space", "\\s+"],
+  ["other", "[^¥円0-9\\s\\n]+"],
 ];
 
-const ARITHMETIC_TYPES: Input["contentType"][] = [
-  "YenMark",
-  "Yen",
-  "number",
-  "operator",
-  "LParen",
-  "RParen",
-  "LF",
-  "space",
-  "other",
+// 全角括弧（）は「¥1000（昼ごはん）」のような注釈で使われるため、括弧として扱わない。
+// 空白を [^\S\n]+ にしているのは、計算式モードでは改行が式の区切りになるので
+// 「100 \n200円」の改行を空白に飲ませてはいけないため。
+const ARITHMETIC_RULES: Rule[] = [
+  ["YenMark", "[¥￥]"],
+  ["Yen", "円"],
+  ["number", "[0-9]+(?:,[0-9]{3})*(?:\\.[0-9]+)?"],
+  ["operator", `[${OPERATOR_CHARS}]`],
+  ["LParen", "\\("],
+  ["RParen", "\\)"],
+  ["LF", "\\n"],
+  ["space", "[^\\S\\n]+"],
+  ["other", `[^¥￥円0-9\\s${OPERATOR_CHARS}()]+`],
 ];
 
-function scan(
-  inputText: string,
-  pattern: RegExp,
-  types: Input["contentType"][],
-): Input[] {
+// パターンと種別を1つの表から作ることで、キャプチャグループの順番と種別がずれないようにする
+function createScanner(rules: Rule[]): Scanner {
+  return {
+    pattern: new RegExp(
+      rules.map(([, source]) => `(${source})`).join("|"),
+      "g",
+    ),
+    types: rules.map(([contentType]) => contentType),
+  };
+}
+
+const DEFAULT_SCANNER = createScanner(DEFAULT_RULES);
+const ARITHMETIC_SCANNER = createScanner(ARITHMETIC_RULES);
+
+function scan(inputText: string, { pattern, types }: Scanner): Input[] {
   const result: Input[] = [];
   pattern.lastIndex = 0;
 
@@ -63,8 +58,8 @@ function scan(
     for (let group = 0; group < types.length; group++) {
       const content = match[group + 1];
       if (content !== undefined) {
-        // 「円」は表記ゆれがないため、従来どおりリテラルに正規化する
         const contentType = types[group];
+        // 「円」は表記ゆれが無いので、後段が content を見比べずに済むよう正規化する
         result.push({
           content: contentType === "Yen" ? "円" : content,
           contentType,
@@ -78,14 +73,11 @@ function scan(
   return result;
 }
 
-// 行頭の「- 」「* 」「+ 」は箇条書きの記号とみなし、演算子から降格させる。
-// 空白が続かない「-100円」は負数としてそのまま演算子に残す。
+// 「- 100円」は箇条書き、「-100円」は負数。空白が続くかどうかで区別する。
 function demoteBulletMarkers(tokens: Input[]): Input[] {
   let atLineStart = true;
 
-  for (let index = 0; index < tokens.length; index++) {
-    const token = tokens[index];
-
+  for (const [index, token] of tokens.entries()) {
     if (token.contentType === "LF") {
       atLineStart = true;
       continue;
@@ -113,12 +105,10 @@ function demoteBulletMarkers(tokens: Input[]): Input[] {
 
 function tokenize(inputText: string, arithmeticMode = false): Input[] {
   if (!arithmeticMode) {
-    return scan(inputText, DEFAULT_PATTERN, DEFAULT_TYPES);
+    return scan(inputText, DEFAULT_SCANNER);
   }
 
-  return demoteBulletMarkers(
-    scan(inputText, ARITHMETIC_PATTERN, ARITHMETIC_TYPES),
-  );
+  return demoteBulletMarkers(scan(inputText, ARITHMETIC_SCANNER));
 }
 
 export { tokenize };
